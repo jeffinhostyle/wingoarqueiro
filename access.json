@@ -1,0 +1,25 @@
+{
+  "users": {},
+  "codes": {
+    "leo202501": {
+      "used": false,
+      "expires": "2025-08-28"
+    },
+    "enrique202501": {
+      "used": false,
+      "expires": "2025-08-28"
+    },
+    "carlos20250825": {
+      "used": false,
+      "expires": "2025-08-25"
+    },
+    "joao20250915": {
+      "used": false,
+      "expires": "2025-09-15"
+    },
+    "acesso30": {
+      "used": false,
+      "expires": "2099-12-31"
+    }
+  }
+}
