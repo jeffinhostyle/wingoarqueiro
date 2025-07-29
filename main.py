@@ -1,28 +1,37 @@
+import json
+import random
+from datetime import datetime, timedelta
 from telegram.ext import Updater, CommandHandler, CallbackContext
 from telegram import Update
-import random
-import json
-import os
-from datetime import datetime, timedelta
 
+# Seu Telegram ID admin
 ADMIN_ID = 5052937721
-CODES_FILE = "codes.json"
-CLIENTS_FILE = "clients.json"
-VALID_DAYS = 7
 
-def load_data(file):
-    if os.path.exists(file):
-        with open(file, "r") as f:
-            return json.load(f)
-    return {}
+# Arquivo para salvar dados (clientes e códigos)
+DATA_FILE = "clientes.json"
 
-def save_data(file, data):
-    with open(file, "w") as f:
-        json.dump(data, f)
+# Dicionário para armazenar dados em runtime
+dados = {
+    "clientes": {},  # user_id : {"validade": "YYYY-MM-DDTHH:MM:SS"}
+    "codigos": {}    # codigo : {"ativo": True/False, "gerado_em": "YYYY-MM-DDTHH:MM:SS"}
+}
+
+def salvar_dados():
+    with open(DATA_FILE, "w") as f:
+        json.dump(dados, f)
+
+def carregar_dados():
+    global dados
+    try:
+        with open(DATA_FILE, "r") as f:
+            dados = json.load(f)
+    except FileNotFoundError:
+        salvar_dados()  # Cria arquivo vazio na primeira vez
 
 def start(update: Update, context: CallbackContext):
     update.message.reply_text(
-        "Olá! Use /gerarcodigo (admin) para criar código, /ativar <código> para ativar, /status para ver seu status."
+        "Olá! Use /gerarcodigo para gerar um código de ativação (somente admin).\n"
+        "Clientes usam /ativar <codigo> para ativar seu acesso."
     )
 
 def gerar_codigo(update: Update, context: CallbackContext):
@@ -30,84 +39,86 @@ def gerar_codigo(update: Update, context: CallbackContext):
     if user_id != ADMIN_ID:
         update.message.reply_text("Você não tem permissão para usar este comando.")
         return
-    
-    codes = load_data(CODES_FILE)
+
+    # Gera código único de 10 caracteres alfanuméricos
     while True:
         codigo = ''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', k=10))
-        if codigo not in codes:
+        if codigo not in dados["codigos"]:
             break
-    
-    expire_date = (datetime.now() + timedelta(days=VALID_DAYS)).strftime("%Y-%m-%d %H:%M:%S")
-    codes[codigo] = {"used": False, "expire": expire_date}
-    save_data(CODES_FILE, codes)
 
-    update.message.reply_text(f"Código gerado: {codigo}\nVálido até: {expire_date}")
+    dados["codigos"][codigo] = {
+        "ativo": True,
+        "gerado_em": datetime.utcnow().isoformat()
+    }
+    salvar_dados()
+
+    update.message.reply_text(f"Código gerado: {codigo}")
 
 def ativar(update: Update, context: CallbackContext):
     user_id = str(update.effective_user.id)
     args = context.args
-    if len(args) != 1:
-        update.message.reply_text("Use /ativar <código> para ativar.")
-        return
-    
-    codigo = args[0].upper()
-    codes = load_data(CODES_FILE)
-    clients = load_data(CLIENTS_FILE)
 
-    if codigo not in codes:
+    if user_id == str(ADMIN_ID):
+        # Admin sempre liberado
+        update.message.reply_text("Seu acesso é permanente e liberado automaticamente.")
+        return
+
+    if not args:
+        update.message.reply_text("Use: /ativar <codigo>")
+        return
+
+    codigo = args[0].upper()
+    if codigo not in dados["codigos"]:
         update.message.reply_text("Código inválido.")
         return
-    
-    code_data = codes[codigo]
-    if code_data["used"]:
+
+    if not dados["codigos"][codigo]["ativo"]:
         update.message.reply_text("Este código já foi usado.")
         return
-    
-    expire = datetime.strptime(code_data["expire"], "%Y-%m-%d %H:%M:%S")
-    if datetime.now() > expire:
-        update.message.reply_text("Este código está expirado.")
+
+    # Ativa para o usuário por 30 dias
+    validade = datetime.utcnow() + timedelta(days=30)
+    dados["clientes"][user_id] = {"validade": validade.isoformat()}
+
+    # Marca código como usado
+    dados["codigos"][codigo]["ativo"] = False
+    salvar_dados()
+
+    update.message.reply_text(f"Ativação feita com sucesso! Seu acesso é válido até {validade.strftime('%d/%m/%Y %H:%M:%S UTC')}.")
+
+def check_acesso(user_id: int) -> bool:
+    user_id_str = str(user_id)
+    if user_id == ADMIN_ID:
+        return True
+    if user_id_str in dados["clientes"]:
+        validade = datetime.fromisoformat(dados["clientes"][user_id_str]["validade"])
+        if datetime.utcnow() <= validade:
+            return True
+        else:
+            # Acesso expirou, remove cliente
+            del dados["clientes"][user_id_str]
+            salvar_dados()
+    return False
+
+# Exemplo de função que enviaria sinal após padrão (implementar conforme seu código original)
+def enviar_sinal(update: Update, context: CallbackContext):
+    user_id = update.effective_user.id
+    if not check_acesso(user_id):
+        update.message.reply_text("Você precisa ativar seu acesso usando /ativar <codigo> para receber sinais.")
         return
-
-    clients[user_id] = {
-        "codigo": codigo,
-        "ativado_em": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "expira_em": code_data["expire"]
-    }
-    save_data(CLIENTS_FILE, clients)
-
-    codes[codigo]["used"] = True
-    save_data(CODES_FILE, codes)
-
-    update.message.reply_text(f"Ativado com sucesso! Seu acesso expira em {code_data['expire']}")
-
-def status(update: Update, context: CallbackContext):
-    user_id = str(update.effective_user.id)
-    clients = load_data(CLIENTS_FILE)
-    if user_id not in clients:
-        update.message.reply_text("Você não está ativado. Use /ativar <código> para ativar seu acesso.")
-        return
-    
-    data = clients[user_id]
-    expire = datetime.strptime(data["expira_em"], "%Y-%m-%d %H:%M:%S")
-    agora = datetime.now()
-    if agora > expire:
-        update.message.reply_text("Seu acesso expirou. Por favor, ative novamente com um código válido.")
-        return
-    
-    dias_restantes = (expire - agora).days
-    update.message.reply_text(
-        f"Você está ativado!\nCódigo usado: {data['codigo']}\nExpira em: {data['expira_em']} ({dias_restantes} dias restantes)"
-    )
+    # Aqui entra sua lógica para enviar sinal automaticamente
+    update.message.reply_text("Sinal enviado! (lógica do padrão de 10 resultados)")
 
 def main():
-    TOKEN = "7920202192:AAEGpjy5k39moDng2DpWqw_LEgmmFU-QI1U"
+    carregar_dados()
+    TOKEN = '7920202192:AAEGpjy5k39moDng2DpWqw_LEgmmFU-QI1U'
     updater = Updater(TOKEN, use_context=True)
     dp = updater.dispatcher
 
     dp.add_handler(CommandHandler("start", start))
     dp.add_handler(CommandHandler("gerarcodigo", gerar_codigo))
     dp.add_handler(CommandHandler("ativar", ativar))
-    dp.add_handler(CommandHandler("status", status))
+    # dp.add_handler(CommandHandler("sinal", enviar_sinal))  # Não necessário, sinais automáticos
 
     updater.start_polling()
     updater.idle()
