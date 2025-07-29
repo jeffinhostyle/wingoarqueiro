@@ -1,15 +1,20 @@
 from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder, CommandHandler, ContextTypes,
-    MessageHandler, filters
-)
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 import datetime
 import random
+import logging
+
+# Configuração básica de logging
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+
+logger = logging.getLogger(__name__)
 
 ADMIN_ID = 5052937721
-
-clients = {}  # user_id: validade datetime
-activation_codes = {}  # codigo: validade datetime
+clients = {}
+activation_codes = {}
 
 def gerar_codigo_unico():
     return ''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', k=10))
@@ -29,44 +34,45 @@ async def ativar(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Uso correto: /ativar <código>")
         return
     codigo = context.args[0].upper()
-    validade = activation_codes.get(codigo)
-    if validade and validade > datetime.datetime.now():
-        clients[user_id] = validade
-        del activation_codes[codigo]
-        await update.message.reply_text(f"Código ativado com sucesso! Validade até {validade.strftime('%d/%m/%Y %H:%M')}")
+    if codigo in activation_codes:
+        validade = activation_codes[codigo]
+        if validade > datetime.datetime.now():
+            clients[user_id] = validade
+            del activation_codes[codigo]
+            await update.message.reply_text(f"Código ativado com sucesso! Validade até {validade}.")
+        else:
+            await update.message.reply_text("Código expirado.")
     else:
-        await update.message.reply_text("Código inválido ou expirado.")
+        await update.message.reply_text("Código inválido.")
 
 def cliente_ativo(user_id):
     if user_id == ADMIN_ID:
         return True
     validade = clients.get(user_id)
-    return validade is not None and validade > datetime.datetime.now()
+    if validade and validade > datetime.datetime.now():
+        return True
+    return False
 
-async def analisar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def analisar_resultado(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    texto = update.message.text.lower()
-
     if not cliente_ativo(user_id):
         await update.message.reply_text("Você não está ativado. Use /ativar <código> para ativar seu acesso.")
         return
-
-    # Limpa o texto para conter só 'g' e 'p'
-    seq = ''.join(c for c in texto if c in ('g', 'p'))
-    if len(seq) != 10:
-        # Se não for exatamente 10 letras, ignora (ou pode avisar)
+    if not context.args or len(context.args[0]) != 10:
+        await update.message.reply_text("Envie uma sequência de 10 resultados (g/p), exemplo: /sinal gpgppggpgp")
         return
-
-    # Análise da sequência
-    if seq[-3:] in ('ggg', 'ppp'):
+    seq = context.args[0].lower()
+    seq = ''.join([c for c in seq if c in ['g', 'p']])
+    if len(seq) != 10:
+        await update.message.reply_text("Sequência inválida. Use somente 10 letras g ou p, juntas.")
+        return
+    if seq[-3:] == 'ggg' or seq[-3:] == 'ppp':
         await update.message.reply_text(
             "⚠️ Padrão não favorável detectado.\nPor segurança, aguarde mais 3 rodadas antes de apostar."
         )
         return
-
     g_count = seq.count('g')
     p_count = seq.count('p')
-
     if g_count > p_count:
         sinal = 'P'
     elif p_count > g_count:
@@ -76,32 +82,30 @@ async def analisar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "⚠️ Padrão não favorável detectado.\nPor segurança, aguarde mais 3 rodadas antes de apostar."
         )
         return
-
     await update.message.reply_text(
         f"🎯 Próxima aposta: {sinal}\nUse no máximo 3 gales para otimizar suas chances.\nApós ganhar, aguarde 3 rodadas antes de apostar novamente."
     )
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Bem-vindo ao bot Wingo Arqueiro!\n"
-        "Admin: use /gerarcodigo para gerar códigos.\n"
-        "Clientes: use /ativar <código> para ativar.\n"
-        "Envie a sequência de 10 resultados (g/p) diretamente para receber seu sinal automaticamente."
+        "Bem-vindo ao bot Wingo Arqueiro!\nUse /gerarcodigo (admin) para gerar códigos.\nClientes: use /ativar <código> para ativar.\n"
+        "Para receber sinal, envie: /sinal <sequência de 10 resultados g/p>"
     )
 
 def main():
-    token = "7920202192:AAEGpjy5k39moDng2DpWqw_LEgmmFU-QI1U"
+    token = '7920202192:AAEGpjy5k39moDng2DpWqw_LEgmmFU-QI1U'
     app = ApplicationBuilder().token(token).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("gerarcodigo", gerarcodigo))
     app.add_handler(CommandHandler("ativar", ativar))
+    app.add_handler(CommandHandler("sinal", analisar_resultado))
 
-    # Qualquer texto enviado pelo usuário será analisado para sequência automaticamente
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), analisar_texto))
-
-    print("Bot rodando...")
-    app.run_polling()
+    logger.info("Bot rodando...")
+    try:
+        app.run_polling()
+    except Exception as e:
+        logger.error(f"Erro crítico no bot: {e}")
 
 if __name__ == "__main__":
     main()
