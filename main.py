@@ -1,127 +1,115 @@
-import json
+import logging
 import random
 from datetime import datetime, timedelta
-from telegram.ext import Updater, CommandHandler, CallbackContext
 from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 
-# Seu Telegram ID admin
-ADMIN_ID = 5052937721
+# IDs e dados
+ADMIN_ID = 5052937721  # Seu ID permanente
+users_data = {}
+codes_validos = set()
+codes_ativos = {}
 
-# Arquivo para salvar dados (clientes e códigos)
-DATA_FILE = "clientes.json"
+# Ativação de logs
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO
+)
 
-# Dicionário para armazenar dados em runtime
-dados = {
-    "clientes": {},  # user_id : {"validade": "YYYY-MM-DDTHH:MM:SS"}
-    "codigos": {}    # codigo : {"ativo": True/False, "gerado_em": "YYYY-MM-DDTHH:MM:SS"}
-}
+# Gerar códigos únicos
+def gerar_codigo():
+    letras = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
+    return ''.join(random.choices(letras, k=8))
 
-def salvar_dados():
-    with open(DATA_FILE, "w") as f:
-        json.dump(dados, f)
+# Comando para o admin gerar códigos
+async def gerar_codigo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ Você não tem permissão para gerar códigos.")
+        return
+    codigo = gerar_codigo()
+    codes_validos.add(codigo)
+    await update.message.reply_text(f"✅ Código gerado: `{codigo}`", parse_mode="Markdown")
 
-def carregar_dados():
-    global dados
-    try:
-        with open(DATA_FILE, "r") as f:
-            dados = json.load(f)
-    except FileNotFoundError:
-        salvar_dados()  # Cria arquivo vazio na primeira vez
+# Comando de ativação do código
+async def ativar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if len(context.args) != 1:
+        await update.message.reply_text("⚠️ Use o comando assim: /ativar <seu código>")
+        return
 
-def start(update: Update, context: CallbackContext):
-    update.message.reply_text(
-        "Olá! Use /gerarcodigo para gerar um código de ativação (somente admin).\n"
-        "Clientes usam /ativar <codigo> para ativar seu acesso."
-    )
-
-def gerar_codigo(update: Update, context: CallbackContext):
+    codigo = context.args[0].upper()
     user_id = update.effective_user.id
-    if user_id != ADMIN_ID:
-        update.message.reply_text("Você não tem permissão para usar este comando.")
+
+    if user_id == ADMIN_ID:
+        users_data[user_id] = {'expira_em': datetime.max}
+        await update.message.reply_text("✅ Acesso vitalício liberado para o administrador.")
         return
 
-    # Gera código único de 10 caracteres alfanuméricos
-    while True:
-        codigo = ''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', k=10))
-        if codigo not in dados["codigos"]:
-            break
-
-    dados["codigos"][codigo] = {
-        "ativo": True,
-        "gerado_em": datetime.utcnow().isoformat()
-    }
-    salvar_dados()
-
-    update.message.reply_text(f"Código gerado: {codigo}")
-
-def ativar(update: Update, context: CallbackContext):
-    user_id = str(update.effective_user.id)
-    args = context.args
-
-    if user_id == str(ADMIN_ID):
-        # Admin sempre liberado
-        update.message.reply_text("Seu acesso é permanente e liberado automaticamente.")
+    if codigo not in codes_validos:
+        await update.message.reply_text("❌ Código inválido ou já utilizado.")
         return
 
-    if not args:
-        update.message.reply_text("Use: /ativar <codigo>")
-        return
+    expira_em = datetime.now() + timedelta(days=30)
+    users_data[user_id] = {'expira_em': expira_em}
+    codes_validos.remove(codigo)
+    codes_ativos[codigo] = user_id
 
-    codigo = args[0].upper()
-    if codigo not in dados["codigos"]:
-        update.message.reply_text("Código inválido.")
-        return
+    await update.message.reply_text("✅ Código ativado com sucesso! Você pode começar a enviar sua sequência.")
 
-    if not dados["codigos"][codigo]["ativo"]:
-        update.message.reply_text("Este código já foi usado.")
-        return
-
-    # Ativa para o usuário por 30 dias
-    validade = datetime.utcnow() + timedelta(days=30)
-    dados["clientes"][user_id] = {"validade": validade.isoformat()}
-
-    # Marca código como usado
-    dados["codigos"][codigo]["ativo"] = False
-    salvar_dados()
-
-    update.message.reply_text(f"Ativação feita com sucesso! Seu acesso é válido até {validade.strftime('%d/%m/%Y %H:%M:%S UTC')}.")
-
-def check_acesso(user_id: int) -> bool:
-    user_id_str = str(user_id)
+# Verificação de acesso
+def acesso_liberado(user_id):
     if user_id == ADMIN_ID:
         return True
-    if user_id_str in dados["clientes"]:
-        validade = datetime.fromisoformat(dados["clientes"][user_id_str]["validade"])
-        if datetime.utcnow() <= validade:
-            return True
-        else:
-            # Acesso expirou, remove cliente
-            del dados["clientes"][user_id_str]
-            salvar_dados()
-    return False
+    dados = users_data.get(user_id)
+    if not dados:
+        return False
+    return dados['expira_em'] > datetime.now()
 
-# Exemplo de função que enviaria sinal após padrão (implementar conforme seu código original)
-def enviar_sinal(update: Update, context: CallbackContext):
+# Lógica de análise dos sinais
+async def processar_sinal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if not check_acesso(user_id):
-        update.message.reply_text("Você precisa ativar seu acesso usando /ativar <codigo> para receber sinais.")
+    texto = update.message.text.lower().strip()
+
+    # Verifica acesso
+    if not acesso_liberado(user_id):
+        await update.message.reply_text("🚫 Você não tem acesso. Use /ativar <código> para liberar o sinal.")
         return
-    # Aqui entra sua lógica para enviar sinal automaticamente
-    update.message.reply_text("Sinal enviado! (lógica do padrão de 10 resultados)")
 
-def main():
-    carregar_dados()
-    TOKEN = '7920202192:AAEGpjy5k39moDng2DpWqw_LEgmmFU-QI1U'
-    updater = Updater(TOKEN, use_context=True)
-    dp = updater.dispatcher
+    # Filtrar apenas g e p
+    sequencia = ''.join([c for c in texto if c in ['g', 'p']])
 
-    dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(CommandHandler("gerarcodigo", gerar_codigo))
-    dp.add_handler(CommandHandler("ativar", ativar))
-    # dp.add_handler(CommandHandler("sinal", enviar_sinal))  # Não necessário, sinais automáticos
+    if len(sequencia) != 10:
+        await update.message.reply_text("⚠️ Envie exatamente 10 resultados usando apenas G ou P. Ex: `gpgppggpgp`", parse_mode="Markdown")
+        return
 
-    updater.start_polling()
-    updater.idle()
+    ultimos3 = sequencia[-3:]
+    if ultimos3 == 'ggg' or ultimos3 == 'ppp':
+        await update.message.reply_text("⚠️ Padrão não favorável detectado.\nPor segurança, aguarde mais 3 rodadas antes de voltar a apostar.")
+        return
 
-if __name__ == "__main__":
-    main()
+    g_count = sequencia.count('g')
+    p_count = sequencia.count('p')
+
+    if g_count == p_count:
+        await update.message.reply_text("⚠️ Padrão não favorável detectado.\nPor segurança, aguarde mais 3 rodadas antes de voltar a apostar.")
+        return
+
+    sinal = 'P' if g_count > p_count else 'G'
+    await update.message.reply_text(
+        f"🎯 Próxima aposta: *{sinal}*\nUse no máximo 3 gales para otimizar suas chances.\nApós ganhar no green, aguarde 3 rodadas antes de apostar novamente.",
+        parse_mode="Markdown"
+    )
+
+# Inicialização do bot
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("👋 Envie uma sequência de 10 resultados (G ou P) para receber seu sinal!")
+
+# Main
+if __name__ == '__main__':
+    app = ApplicationBuilder().token("COLE_SEU_TOKEN_AQUI").build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("ativar", ativar_cmd))
+    app.add_handler(CommandHandler("gerarcodigo", gerar_codigo_cmd))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, processar_sinal))
+
+    print("🤖 Bot iniciado...")
+    app.run_polling()
