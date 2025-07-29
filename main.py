@@ -1,47 +1,116 @@
+from telegram.ext import Updater, CommandHandler, CallbackContext
+from telegram import Update
+import random
+import json
 import os
-import telebot
-from flask import Flask, request
+from datetime import datetime, timedelta
 
-API_TOKEN = os.getenv('API_TOKEN', '7920202192:AAEGpjy5k39moDng2DpWqw_LEgmmFU-QI1U')
-bot = telebot.TeleBot(API_TOKEN)
+ADMIN_ID = 5052937721
+CODES_FILE = "codes.json"
+CLIENTS_FILE = "clients.json"
+VALID_DAYS = 7
 
-app = Flask(__name__)
+def load_data(file):
+    if os.path.exists(file):
+        with open(file, "r") as f:
+            return json.load(f)
+    return {}
 
-# Função para análise da roleta
-def analisar_resultados(resultados):
-    padrao = ''.join(resultados[-3:])
-    if padrao == 'GGG':
-        return 'Entrar no PRETO - Gale 1'
-    elif padrao == 'PPP':
-        return 'Entrar no VERMELHO - Gale 1'
-    else:
-        return 'Aguardar novo sinal.'
+def save_data(file, data):
+    with open(file, "w") as f:
+        json.dump(data, f)
 
-@bot.message_handler(commands=['start'])
-def send_welcome(message):
-    bot.reply_to(message, "Olá! Envie os últimos 10 resultados da roleta (com G ou P) e eu te digo a melhor entrada!")
+def start(update: Update, context: CallbackContext):
+    update.message.reply_text(
+        "Olá! Use /gerarcodigo (admin) para criar código, /ativar <código> para ativar, /status para ver seu status."
+    )
 
-@bot.message_handler(func=lambda m: True)
-def handle_message(message):
-    texto = message.text.upper().replace(" ", "")
-    if all(c in "GP" for c in texto) and 8 <= len(texto) <= 12:
-        sugestao = analisar_resultados(list(texto)[-10:])
-        bot.reply_to(message, f"📊 Análise feita!\nSugestão: {sugestao}")
-    else:
-        bot.reply_to(message, "Envie os últimos 10 resultados usando apenas G (vermelho) e P (preto).")
+def gerar_codigo(update: Update, context: CallbackContext):
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID:
+        update.message.reply_text("Você não tem permissão para usar este comando.")
+        return
+    
+    codes = load_data(CODES_FILE)
+    while True:
+        codigo = ''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', k=10))
+        if codigo not in codes:
+            break
+    
+    expire_date = (datetime.now() + timedelta(days=VALID_DAYS)).strftime("%Y-%m-%d %H:%M:%S")
+    codes[codigo] = {"used": False, "expire": expire_date}
+    save_data(CODES_FILE, codes)
 
-@app.route(f'/{API_TOKEN}', methods=['POST'])
-def webhook():
-    json_str = request.get_data().decode('UTF-8')
-    update = telebot.types.Update.de_json(json_str)
-    bot.process_new_updates([update])
-    return 'OK', 200
+    update.message.reply_text(f"Código gerado: {codigo}\nVálido até: {expire_date}")
 
-@app.route('/')
-def home():
-    return 'Bot está ativo!', 200
+def ativar(update: Update, context: CallbackContext):
+    user_id = str(update.effective_user.id)
+    args = context.args
+    if len(args) != 1:
+        update.message.reply_text("Use /ativar <código> para ativar.")
+        return
+    
+    codigo = args[0].upper()
+    codes = load_data(CODES_FILE)
+    clients = load_data(CLIENTS_FILE)
 
-if __name__ == '__main__':
-    bot.remove_webhook()
-    bot.set_webhook(url=f'https://SEU-LINK-DO-RENDER.onrender.com/{API_TOKEN}')
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+    if codigo not in codes:
+        update.message.reply_text("Código inválido.")
+        return
+    
+    code_data = codes[codigo]
+    if code_data["used"]:
+        update.message.reply_text("Este código já foi usado.")
+        return
+    
+    expire = datetime.strptime(code_data["expire"], "%Y-%m-%d %H:%M:%S")
+    if datetime.now() > expire:
+        update.message.reply_text("Este código está expirado.")
+        return
+
+    clients[user_id] = {
+        "codigo": codigo,
+        "ativado_em": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "expira_em": code_data["expire"]
+    }
+    save_data(CLIENTS_FILE, clients)
+
+    codes[codigo]["used"] = True
+    save_data(CODES_FILE, codes)
+
+    update.message.reply_text(f"Ativado com sucesso! Seu acesso expira em {code_data['expire']}")
+
+def status(update: Update, context: CallbackContext):
+    user_id = str(update.effective_user.id)
+    clients = load_data(CLIENTS_FILE)
+    if user_id not in clients:
+        update.message.reply_text("Você não está ativado. Use /ativar <código> para ativar seu acesso.")
+        return
+    
+    data = clients[user_id]
+    expire = datetime.strptime(data["expira_em"], "%Y-%m-%d %H:%M:%S")
+    agora = datetime.now()
+    if agora > expire:
+        update.message.reply_text("Seu acesso expirou. Por favor, ative novamente com um código válido.")
+        return
+    
+    dias_restantes = (expire - agora).days
+    update.message.reply_text(
+        f"Você está ativado!\nCódigo usado: {data['codigo']}\nExpira em: {data['expira_em']} ({dias_restantes} dias restantes)"
+    )
+
+def main():
+    TOKEN = "7920202192:AAEGpjy5k39moDng2DpWqw_LEgmmFU-QI1U"
+    updater = Updater(TOKEN, use_context=True)
+    dp = updater.dispatcher
+
+    dp.add_handler(CommandHandler("start", start))
+    dp.add_handler(CommandHandler("gerarcodigo", gerar_codigo))
+    dp.add_handler(CommandHandler("ativar", ativar))
+    dp.add_handler(CommandHandler("status", status))
+
+    updater.start_polling()
+    updater.idle()
+
+if __name__ == "__main__":
+    main()
